@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "bootloader",
+    "kernel",
+]
+default-members = ["bootloader"]
+resolver = "3"
