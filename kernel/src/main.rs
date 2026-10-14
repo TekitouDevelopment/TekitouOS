@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+mod gdt;
+mod idt;
+
 use core::mem::size_of;
 use core::panic::PanicInfo;
 
@@ -76,6 +79,16 @@ pub extern "win64" fn _start(
         halt();
     }
 
+    crate::gdt::init_gdt();
+    crate::idt::init_idt(info);
+
+
+    if !fill_screen_green(info) {
+        halt();
+    }
+
+
+
     loop {
         core::hint::spin_loop();
     }
@@ -99,6 +112,75 @@ fn fill_screen_white(info: &BootInfo) -> bool {
     let pixel: u32 = match info.pixel_format {
         // RGB/BGR どちらも緑は同じ値になる
         0 | 1 => 0xFFFFFF,
+
+        // PixelBitMask: GreenMask を使う
+        2 => {
+            let white_mask = info.pixel_information[1];
+
+            if white_mask == 0 {
+                return false;
+            }
+
+            white_mask
+        }
+
+        // PixelBltOnly などは非対応
+        _ => return false,
+    };
+
+    // フレームバッファの必要サイズを検証
+    let required_bytes = match (pitch as u64)
+        .checked_mul(height as u64)
+        .and_then(|pixels| pixels.checked_mul(4))
+    {
+        Some(size) => size,
+        None => return false,
+    };
+
+    if required_bytes > info.framebuffer_size
+        || info.framebuffer_base.checked_add(required_bytes).is_none()
+    {
+        return false;
+    }
+
+    let framebuffer =
+        info.framebuffer_base as usize as *mut u32;
+
+    // 画面全体を白色にする
+    for y in 0..height {
+        let row = y * pitch;
+
+        for x in 0..width {
+            unsafe {
+                framebuffer
+                    .add(row + x)
+                    .write_volatile(pixel);
+            }
+        }
+    }
+
+    true
+}
+
+
+fn fill_screen_green(info: &BootInfo) -> bool {
+    let width = info.framebuffer_width as usize;
+    let height = info.framebuffer_height as usize;
+    let pitch = info.pixels_per_scan_line as usize;
+
+    if info.framebuffer_base == 0
+        || info.framebuffer_size == 0
+        || width == 0
+        || height == 0
+        || pitch < width
+    {
+        return false;
+    }
+
+    // 現在対応するピクセル形式の色を指定する。
+    let pixel: u32 = match info.pixel_format {
+        // RGB/BGR どちらも緑は同じ値になる
+        0 | 1 => 0x00FF00,
 
         // PixelBitMask: GreenMask を使う
         2 => {

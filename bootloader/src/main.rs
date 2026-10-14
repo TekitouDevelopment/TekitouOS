@@ -1322,8 +1322,6 @@ pub extern "efiapi" fn efi_main(
         // MapKey が無効になった場合はメモリマップからやり直す。
     }
 
-    // ここから先は Boot Services に依存しない。
-    // カーネルへ制御を渡し、戻らない。
     unsafe {
         tekito_enter_kernel_on_stack(
             runtime_entry as usize,
