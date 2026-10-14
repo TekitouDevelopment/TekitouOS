@@ -9,7 +9,7 @@ mod heap;
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::panic::PanicInfo;
@@ -103,6 +103,17 @@ pub extern "win64" fn _start(
 
     if !crate::heap::init(heap_base as usize, heap_size) {
         halt();
+    }
+
+    for i in 0..20_00000_u64 {
+        let text = i.to_string();
+
+        if text.is_empty() {
+            halt();
+        }
+
+        // スコープの終わりでStringがdropされ、
+        // GlobalAlloc::deallocが呼ばれる。
     }
 
     if !fill_screen_green(info) {
