@@ -71,11 +71,10 @@ pub extern "win64" fn _start(
         halt();
     }
 
-    // BootInfo の検証成功
+    // 画面を白くする
     if !fill_screen_white(info) {
         halt();
     }
-
 
     loop {
         core::hint::spin_loop();
@@ -149,6 +148,7 @@ fn fill_screen_white(info: &BootInfo) -> bool {
 
     true
 }
+
 
 fn halt() -> ! {
     loop {

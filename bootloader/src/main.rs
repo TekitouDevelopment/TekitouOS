@@ -5,7 +5,7 @@
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 
-use core::mem::{size_of, transmute};
+use core::mem::{size_of};
 use core::ptr::{
     copy_nonoverlapping,
     null_mut,
@@ -14,6 +14,10 @@ use core::ptr::{
     write_unaligned,
 };
 
+
+const KERNEL_STACK_PAGES: usize = 16;
+
+
 const EFI_ALLOCATE_ANY_PAGES: u32 = 0;
 const R_X86_64_RELATIVE: u32 = 8;
 
@@ -21,6 +25,43 @@ type EfiStatus = usize;
 type EfiHandle = *mut c_void;
 
 const BUFFER_SIZE: usize = 256;
+
+core::arch::global_asm!(
+    r#"
+    .global tekito_enter_kernel_on_stack
+tekito_enter_kernel_on_stack:
+    // Win64 ABI:
+    // RCX = kernel entry address
+    // RDX = BootInfo pointer
+    // R8  = new stack top
+
+    mov rax, rcx
+    mov rcx, rdx
+    mov rsp, r8
+
+    // スタックを16バイト境界に揃える
+    and rsp, -16
+
+    // Win64 ABIのshadow spaceを確保
+    sub rsp, 32
+
+    // フレームチェーンの終端
+    xor rbp, rbp
+
+    // 文字列操作の方向フラグをクリア
+    cld
+
+    // 新しいスタックからカーネルを呼び出す
+    call rax
+
+.Ltekito_kernel_returned:
+    // カーネルは戻らない契約だが、
+    // 万一戻ってきた場合にもUEFIへ復帰しない
+    cli
+    hlt
+    jmp .Ltekito_kernel_returned
+"#
+);
 
 // UEFIの共通テーブルヘッダー
 #[repr(C)]
@@ -299,6 +340,7 @@ struct Elf64Rela {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct BootInfo {
     pub magic: u64,
     pub version: u32,
@@ -319,6 +361,15 @@ pub struct BootInfo {
     pub memory_map_size: u64,
     pub memory_map_descriptor_size: u64,
     pub memory_map_descriptor_version: u32,
+}
+
+
+unsafe extern "win64" {
+    fn tekito_enter_kernel_on_stack(
+        entry_address: usize,
+        boot_info: *const BootInfo,
+        stack_top: u64,
+    ) -> !;
 }
 
 const BOOT_INFO_MAGIC: u64 = 0x5445_4B49_544F_4F53;
@@ -1059,19 +1110,65 @@ pub extern "efiapi" fn efi_main(
         memory_map_descriptor_version: 0,
     };
 
+    // BootInfoをブートローダーのスタックから独立させる
+    if size_of::<BootInfo>() > PAGE_SIZE as usize {
+        halt(system_table, "ERROR: BootInfo too large");
+    }
+
+    let mut boot_info_base: u64 = 0;
+
+    let status = unsafe {
+        ((*boot_services).allocate_pages)(
+            EFI_ALLOCATE_ANY_PAGES,
+            EFI_LOADER_DATA,
+            1,
+            &mut boot_info_base,
+        )
+    };
+
+    if status != EFI_SUCCESS || boot_info_base == 0 {
+        halt(system_table, "ERROR: BootInfo allocation failed");
+    }
+
+    let boot_info_ptr = boot_info_base as usize as *mut BootInfo;
+
+    unsafe {
+        boot_info_ptr.write(boot_info);
+    }
+
+
     println(system_table, "Calling PIE kernel entry...");
 
 
-    // カーネルの関数ポインターは事前に作成する。
-    let entry: unsafe extern "win64" fn(*const BootInfo) -> ! =
-        unsafe {
-            transmute::<
-                usize,
-                unsafe extern "win64" fn(*const BootInfo) -> !,
-            >(runtime_entry as usize)
-        };
-
     println(system_table, "Preparing ExitBootServices...");
+
+
+    // カーネル用スタックを確保する（16ページ = 64 KiB）
+    let mut kernel_stack_base: u64 = 0;
+
+    let status = unsafe {
+        ((*boot_services).allocate_pages)(
+            EFI_ALLOCATE_ANY_PAGES,
+            EFI_LOADER_DATA,
+            KERNEL_STACK_PAGES,
+            &mut kernel_stack_base,
+        )
+    };
+
+    if status != EFI_SUCCESS || kernel_stack_base == 0 {
+        halt(system_table, "ERROR: Kernel stack allocation failed");
+    }
+
+    let kernel_stack_size =
+        (KERNEL_STACK_PAGES as u64) * PAGE_SIZE;
+
+    let kernel_stack_top = match
+    kernel_stack_base.checked_add(kernel_stack_size)
+    {
+        Some(top) => top,
+        None => halt(system_table, "ERROR: Kernel stack overflow"),
+    };
+
 
     // メモリマップ用バッファを事前確保する。
     let mut memory_map_buffer: *mut c_void = null_mut();
@@ -1196,6 +1293,11 @@ pub extern "efiapi" fn efi_main(
         boot_info.memory_map_descriptor_size = descriptor_size as u64;
         boot_info.memory_map_descriptor_version = descriptor_version;
 
+        // 専用ページ上のBootInfoも最新の内容に更新する
+        unsafe {
+            boot_info_ptr.write(boot_info);
+        }
+
         // GetMemoryMap の MapKey を使って UEFI を終了する。
         exit_attempted = true;
 
@@ -1223,7 +1325,11 @@ pub extern "efiapi" fn efi_main(
     // ここから先は Boot Services に依存しない。
     // カーネルへ制御を渡し、戻らない。
     unsafe {
-        entry(&boot_info);
+        tekito_enter_kernel_on_stack(
+            runtime_entry as usize,
+            boot_info_ptr as *const BootInfo,
+            kernel_stack_top,
+        );
     }
 }
 
