@@ -1,9 +1,9 @@
-
 ENTRY(_start)
 
 PHDRS
 {
-    image PT_LOAD FLAGS(7);
+    image   PT_LOAD    FLAGS(7);
+    dynamic PT_DYNAMIC FLAGS(6);
 }
 
 SECTIONS
@@ -25,6 +25,16 @@ SECTIONS
         *(.data .data.*)
         *(.got .got.*)
     } :image
+
+        .dynamic : ALIGN(8)
+        {
+            *(.dynamic)
+        } :image :dynamic
+
+        .rela.dyn : ALIGN(8)
+        {
+            *(.rela.dyn)
+        } :image
 
     .bss (NOLOAD) : ALIGN(4096)
     {
