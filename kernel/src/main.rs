@@ -3,7 +3,14 @@
 
 mod gdt;
 mod idt;
+mod memory;
+mod heap;
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::mem::size_of;
 use core::panic::PanicInfo;
 
@@ -82,6 +89,21 @@ pub extern "win64" fn _start(
     crate::gdt::init_gdt();
     crate::idt::init_idt(info);
 
+    crate::memory::init(info);
+
+    const HEAP_PAGES: usize = 64;
+    const PAGE_SIZE: usize = 4096;
+
+    let heap_base = match crate::memory::allocate_pages(HEAP_PAGES) {
+        Some(address) => address,
+        None => halt(),
+    };
+
+    let heap_size = HEAP_PAGES * PAGE_SIZE;
+
+    if !crate::heap::init(heap_base as usize, heap_size) {
+        halt();
+    }
 
     if !fill_screen_green(info) {
         halt();
