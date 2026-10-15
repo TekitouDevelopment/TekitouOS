@@ -9,6 +9,7 @@ mod heap;
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -105,22 +106,9 @@ pub extern "win64" fn _start(
         halt();
     }
 
-    for i in 0..20_00000_u64 {
-        let text = i.to_string();
-
-        if text.is_empty() {
-            halt();
-        }
-
-        // スコープの終わりでStringがdropされ、
-        // GlobalAlloc::deallocが呼ばれる。
-    }
-
     if !fill_screen_green(info) {
         halt();
     }
-
-
 
     loop {
         core::hint::spin_loop();

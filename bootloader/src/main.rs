@@ -15,6 +15,11 @@ use core::ptr::{
 };
 
 
+#[used]
+#[unsafe(link_section = ".sbat")]
+static SBAT_SECTION: [u8; include_bytes!("../../sbat.csv").len()] =
+    *include_bytes!("../../sbat.csv");
+
 const KERNEL_STACK_PAGES: usize = 16;
 
 
