@@ -35,29 +35,7 @@ _start:
 
 #[unsafe(no_mangle)]
 extern "C" fn rust_main(){
-    // 暗緑色を指定
-    let result = syscall1(
-        SYS_SET_SCREEN_COLOR,
-        COLOR_PURPLE,
-    );
-
-    if result == 0 {
-        let _ = syscall1(
-            SYS_SET_SCREEN_COLOR,
-            COLOR_YELLOW,
-        );
-    } else {
-        let _ = syscall1(
-            SYS_SET_SCREEN_COLOR,
-            COLOR_RED,
-        );
-    }
-    //
-    // // ひとまずアプリを終了させず、Ring3に留まる
-    // let _ = result;
-    // loop {
-    //     core::hint::spin_loop();
-    // }
+    syscall1(SYS_SET_SCREEN_COLOR,COLOR_YELLOW);
 }
 
 #[inline(always)]
