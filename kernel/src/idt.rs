@@ -1,6 +1,10 @@
 
 use core::arch::asm;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static RING3_TEST_SYSCALL_COUNT: AtomicUsize =
+    AtomicUsize::new(0);
 
 const IDT_ENTRIES: usize = 256;
 const CPU_EXCEPTION_COUNT: usize = 32;
@@ -41,6 +45,19 @@ impl IdtEntry {
             reserved: 0,
         }
     }
+
+
+    fn user_interrupt_gate(handler: u64) -> Self {
+        Self {
+            offset_low: handler as u16,
+            selector: KERNEL_CODE_SELECTOR,
+            ist: 0,
+            flags: 0xEE, // Present + DPL3 + 64-bit interrupt gate
+            offset_middle: (handler >> 16) as u16,
+            offset_high: (handler >> 32) as u32,
+            reserved: 0,
+        }
+    }
 }
 
 #[repr(C, packed)]
@@ -61,27 +78,32 @@ pub static mut LAST_EXCEPTION_ERROR_CODE: u64 = 0;
 
 unsafe extern "C" {
     static isr_stub_table: [i32; CPU_EXCEPTION_COUNT];
+    static ring3_test_int80_stub: u8;
 }
 
 core::arch::global_asm!(
     r#"
-    // エラーコードをCPUが積まない例外用
+    .section .text,"ax",@progbits
+    .balign 16
+
+    // エラーコードをCPUが積まない例外
     .macro ISR_NOERR num
-        .global isr_stub_\num
+    .global isr_stub_\num
     isr_stub_\num:
         push 0
         push \num
         jmp isr_common
     .endm
 
-    // エラーコードをCPUが積む例外用
+    // エラーコードをCPUが積む例外
     .macro ISR_ERR num
-        .global isr_stub_\num
+    .global isr_stub_\num
     isr_stub_\num:
         push \num
         jmp isr_common
     .endm
 
+    // CPU例外 0〜31
     ISR_NOERR 0
     ISR_NOERR 1
     ISR_NOERR 2
@@ -115,16 +137,19 @@ core::arch::global_asm!(
     ISR_ERR   30
     ISR_NOERR 31
 
+    // --------------------------------------------------
+    // CPU例外の共通ハンドラー
+    // --------------------------------------------------
     isr_common:
         cli
         cld
 
-        // Win64 ABIの第1・第2引数
-        // RSP先頭にはベクター番号、その次にエラーコード
+        // Win64 ABI:
+        // 第1引数 = ベクター番号
+        // 第2引数 = エラーコード
         mov rcx, [rsp]
         mov rdx, [rsp + 8]
 
-        // Win64 ABIに必要なスタックアラインメントと
         // 32バイトのshadow spaceを確保
         and rsp, -16
         sub rsp, 32
@@ -136,11 +161,70 @@ core::arch::global_asm!(
         hlt
         jmp .Lexception_halt
 
-    // 実行時にIDTへ登録する32個のハンドラーのアドレス
-    // ISR本体と同じ.textセクションに置く
-.section .text,"ax",@progbits
-.balign 4
-.global isr_stub_table
+        .balign 16
+    .global ring3_test_int80_stub
+ring3_test_int80_stub:
+    cli
+    cld
+
+    // 汎用レジスタを保存
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    // 保存したレジスタからシステムコール番号と引数を取得
+    // Win64 ABI: RCX, RDX, R8, R9 が第1〜第4引数
+    mov rcx, [rsp + 112]  // syscall number (元のRAX)
+    mov rdx, [rsp + 72]   // arg1 (元のRDI)
+    mov r8,  [rsp + 80]   // arg2 (元のRSI)
+    mov r9,  [rsp + 88]   // arg3 (元のRDX)
+
+    // Win64 ABIのshadow space
+    sub rsp, 32
+    call ring3_test_int80_handler
+
+    // ハンドラーの戻り値を保存済みRAXに格納
+    mov [rsp + 144], rax
+    add rsp, 32
+
+    // レジスタを復元
+    // RAXだけはシステムコールの戻り値になる
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    // ユーザー側の実行状態を復元
+    iretq
+
+    // --------------------------------------------------
+    // CPU例外ハンドラーのアドレステーブル
+    // --------------------------------------------------
+    .balign 4
+    .global isr_stub_table
 isr_stub_table:
     .long isr_stub_0 - isr_stub_table
     .long isr_stub_1 - isr_stub_table
@@ -251,6 +335,16 @@ pub fn init_idt(info: &crate::BootInfo) {
         }
     }
 
+    let ring3_handler = unsafe {
+        core::ptr::addr_of!(ring3_test_int80_stub) as u64
+    };
+
+    unsafe {
+        idt_ptr
+            .add(0x80)
+            .write(IdtEntry::user_interrupt_gate(ring3_handler));
+    }
+
     let idtr = Idtr {
         limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
         base: idt_ptr as u64,
@@ -297,6 +391,8 @@ fn fill_screen(colortype: u8) {
         (1, 0) => 0x0000_00FF, // Blue
         (1, 1) => 0x0000_0080, // Dark blue
 
+        (0, 2) | (1, 2) => 0x0000_8000, // Dark green
+
         // PixelBitMask
         (2, 0) => fb.pixel_information[2],
         (2, 1) => {
@@ -309,6 +405,17 @@ fn fill_screen(colortype: u8) {
             let shift = mask.trailing_zeros();
             let max_value = mask >> shift;
             (max_value / 2 + 1) << shift
+        }
+        (2, 2) => {
+            let mask = fb.pixel_information[1];
+
+            if mask == 0 {
+                return;
+            }
+
+            let shift = mask.trailing_zeros();
+            let max_value = mask >> shift;
+            (max_value / 2) << shift
         }
 
         _ => return,
@@ -366,5 +473,33 @@ extern "win64" fn exception_handler(
         unsafe {
             core::arch::asm!("cli", "hlt", options(nomem, nostack));
         }
+    }
+}
+
+const SYSCALL_RETURN_TEST: u64 = 0x5445_4B49;
+
+#[unsafe(no_mangle)]
+extern "win64" fn ring3_test_int80_handler(
+    number: u64,
+    arg1: u64,
+    _arg2: u64,
+    _arg3: u64,
+) -> u64 {
+    match number {
+        // syscall 1: テスト用の値を返す
+        1 => SYSCALL_RETURN_TEST,
+
+        // syscall 2: 渡された引数が正しければ成功
+        2 => {
+            if arg1 == SYSCALL_RETURN_TEST {
+                fill_screen(2);
+                0
+            } else {
+                u64::MAX
+            }
+        }
+
+        // 未対応のシステムコール
+        _ => u64::MAX,
     }
 }

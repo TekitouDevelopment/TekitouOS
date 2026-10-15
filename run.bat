@@ -33,6 +33,7 @@ echo [4/4] Starting QEMU...
     -global driver=cfi.pflash01,property=secure,value=on ^
     -drive "if=pflash,format=raw,unit=0,file=esp\edk2-x86_64-secure-code.fd,readonly=on" ^
     -drive "if=pflash,format=raw,unit=1,file=esp\edk2-i386-vars.fd" ^
-    -drive "format=raw,file=fat:rw:esp"
+    -drive "format=raw,file=fat:rw:esp" ^
+    -d int -D qemu-int.log
 
 endlocal

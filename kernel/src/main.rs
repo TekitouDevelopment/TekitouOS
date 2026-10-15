@@ -5,6 +5,8 @@ mod gdt;
 mod idt;
 mod memory;
 mod heap;
+mod paging;
+mod user;
 
 extern crate alloc;
 
@@ -90,7 +92,9 @@ pub extern "win64" fn _start(
     crate::gdt::init_gdt();
     crate::idt::init_idt(info);
 
-    crate::memory::init(info);
+    if !crate::memory::init(info) {
+        halt();
+    }
 
     const HEAP_PAGES: usize = 64;
     const PAGE_SIZE: usize = 4096;
@@ -106,9 +110,60 @@ pub extern "win64" fn _start(
         halt();
     }
 
+    if !crate::paging::init() {
+        halt();
+    }
+
+    // マッピング検証用の物理ページを確保する。
+    let test_physical = match crate::memory::allocate_page() {
+        Some(address) => address,
+        None => halt(),
+    };
+
+    // ユーザー領域の先頭ページは将来のコード用に空けておく。
+    let test_virtual = match crate::paging::user_base()
+        .and_then(|base| base.checked_add(4096))
+    {
+        Some(address) => address,
+        None => halt(),
+    };
+
+    // 書き込み可能・実行不可のユーザーページを作る。
+    if !crate::paging::map_user_page(
+        test_virtual,
+        test_physical,
+        true,
+        false,
+    ) {
+        halt();
+    }
+
+    // Ring0から新しい仮想アドレスを読み書きして検証する。
+    let marker: u64 = 0x5445_4B49_544F_4F53;
+
+    unsafe {
+        core::ptr::write_volatile(
+            test_virtual as usize as *mut u64,
+            marker,
+        );
+    }
+
+    let observed = unsafe {
+        core::ptr::read_volatile(
+            test_virtual as usize as *const u64,
+        )
+    };
+
+    if observed != marker {
+        halt();
+    }
+
+
     if !fill_screen_green(info) {
         halt();
     }
+
+    crate::user::run_test();
 
     loop {
         core::hint::spin_loop();

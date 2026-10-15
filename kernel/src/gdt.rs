@@ -5,7 +5,11 @@ const KERNEL_CODE_SELECTOR: u16 = 0x08;
 const KERNEL_DATA_SELECTOR: u16 = 0x10;
 const TSS_SELECTOR: u16 = 0x18;
 
+const USER_DATA_SELECTOR: u16 = 0x2B;
+const USER_CODE_SELECTOR: u16 = 0x33;
+
 const IST_STACK_SIZE: usize = 16 * 1024;
+const PRIVILEGE_STACK_SIZE: usize = 16 * 1024;
 
 #[repr(C, packed(4))]
 #[allow(dead_code)]
@@ -25,22 +29,23 @@ struct TssStorage(TaskStateSegment);
 #[repr(align(16))]
 struct InterruptStack([u8; IST_STACK_SIZE]);
 
+#[repr(align(16))]
+struct PrivilegeStack([u8; PRIVILEGE_STACK_SIZE]);
+
 #[repr(C, packed)]
 struct GdtDescriptorPointer {
     limit: u16,
     base: u64,
 }
 
-// Entry 0: Null
-// Entry 1: Kernel code
-// Entry 2: Kernel data
-// Entries 3-4: 64-bit TSS descriptor
-static mut GDT: [u64; 5] = [
-    0,
-    0x00AF_9A00_0000_FFFF,
-    0x00CF_9200_0000_FFFF,
-    0,
-    0,
+static mut GDT: [u64; 7] = [
+    0,                      // Entry 0: Null
+    0x00AF_9A00_0000_FFFF, // Entry 1: Kernel code
+    0x00CF_9200_0000_FFFF, // Entry 2: Kernel data
+    0,                      // Entry 3: TSS low
+    0,                      // Entry 4: TSS high
+    0x00CF_F200_0000_FFFF, // Entry 5: User data
+    0x00AF_FA00_0000_FFFF, // Entry 6: User code
 ];
 
 static mut TSS: TssStorage = TssStorage(TaskStateSegment {
@@ -55,6 +60,9 @@ static mut TSS: TssStorage = TssStorage(TaskStateSegment {
 
 static mut DOUBLE_FAULT_STACK: InterruptStack =
     InterruptStack([0; IST_STACK_SIZE]);
+
+static mut KERNEL_PRIVILEGE_STACK: PrivilegeStack =
+    PrivilegeStack([0; PRIVILEGE_STACK_SIZE]);
 
 fn make_tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
     let limit = limit as u64;
@@ -74,32 +82,49 @@ fn make_tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
 
 pub fn init_gdt() {
     unsafe {
-        // IST1用の専用スタックの末尾アドレスを取得する
-        let stack_base =
+        // Ring3からRing0へ戻るときに使うカーネルスタック
+        let kernel_stack_base =
+            core::ptr::addr_of_mut!(KERNEL_PRIVILEGE_STACK.0)
+                .cast::<u8>();
+
+        let kernel_stack_top =
+            kernel_stack_base as u64
+                + PRIVILEGE_STACK_SIZE as u64;
+
+        // ダブルフォルト用IST1スタック
+        let double_fault_stack_base =
             core::ptr::addr_of_mut!(DOUBLE_FAULT_STACK.0)
                 .cast::<u8>();
 
-        let stack_top =
-            stack_base as u64 + IST_STACK_SIZE as u64;
+        let double_fault_stack_top =
+            double_fault_stack_base as u64
+                + IST_STACK_SIZE as u64;
 
         let tss_ptr = core::ptr::addr_of_mut!(TSS.0);
 
-        // TSS.ist[0] = IST1
+        // TSS.RSP0 = Ring3からRing0へ遷移するときのスタック
+        let rsp_ptr =
+            core::ptr::addr_of_mut!((*tss_ptr).rsp)
+                .cast::<u64>();
+
+        rsp_ptr.write_unaligned(kernel_stack_top);
+
+        // TSS.IST1 = ダブルフォルト用スタック
         let ist_ptr =
             core::ptr::addr_of_mut!((*tss_ptr).ist)
                 .cast::<u64>();
 
-        ist_ptr.write_unaligned(stack_top);
+        ist_ptr.write_unaligned(double_fault_stack_top);
 
         // I/O bitmapはTSSの範囲外に置く
         let iomap_ptr =
             core::ptr::addr_of_mut!((*tss_ptr).iomap_base);
 
         iomap_ptr.write_unaligned(
-            size_of::<TaskStateSegment>() as u16
+            size_of::<TaskStateSegment>() as u16,
         );
 
-        // TSS記述子をGDTに設定する
+        // TSS記述子をGDTのEntry 3-4に設定する
         let (tss_low, tss_high) = make_tss_descriptor(
             tss_ptr as u64,
             (size_of::<TaskStateSegment>() - 1) as u32,
@@ -112,36 +137,36 @@ pub fn init_gdt() {
         gdt_ptr.add(4).write(tss_high);
 
         let gdtr = GdtDescriptorPointer {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            limit: (size_of::<[u64; 7]>() - 1) as u16,
             base: gdt_ptr as u64,
         };
 
         asm!(
-            "cli",
-            "lgdt [{gdtr}]",
+        "cli",
+        "lgdt [{gdtr}]",
 
-            // CSを新しいコードセグメントに切り替える
-            "push {code_selector}",
-            "lea rax, [rip + 2f]",
-            "push rax",
-            "retfq",
-            "2:",
+        // Ring0のコードセグメントへ再ロード
+        "push {code_selector}",
+        "lea rax, [rip + 2f]",
+        "push rax",
+        "retfq",
+        "2:",
 
-            // データセグメントを再読み込み
-            "mov ax, {data_selector}",
-            "mov ds, ax",
-            "mov es, ax",
-            "mov ss, ax",
+        // Ring0のデータセグメントを再ロード
+        "mov ax, {data_selector}",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov ss, ax",
 
-            // Task RegisterにTSSをロードする
-            "mov ax, {tss_selector}",
-            "ltr ax",
+        // TSSをTask Registerへロード
+        "mov ax, {tss_selector}",
+        "ltr ax",
 
-            out("rax") _,
-            gdtr = in(reg) &gdtr,
-            code_selector = const KERNEL_CODE_SELECTOR,
-            data_selector = const KERNEL_DATA_SELECTOR,
-            tss_selector = const TSS_SELECTOR,
+        out("rax") _,
+        gdtr = in(reg) &gdtr,
+        code_selector = const KERNEL_CODE_SELECTOR,
+        data_selector = const KERNEL_DATA_SELECTOR,
+        tss_selector = const TSS_SELECTOR,
         );
     }
 }
