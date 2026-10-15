@@ -6,28 +6,8 @@ const PAGE_SIZE: u64 = 4096;
 const USER_DATA_SELECTOR: u64 = 0x2B;
 const USER_CODE_SELECTOR: u64 = 0x33;
 
-// push rax; pop rax; int 0x80; jmp $
-// ユーザースタックへのアクセスと割り込み呼び出しを試す。
-const USER_TEST_CODE: [u8; 18] = [
-    // mov eax, 1
-    0xB8, 0x01, 0x00, 0x00, 0x00,
+const USER_TEST_CODE: &[u8] = include_bytes!("../testapp1.bin");
 
-    // int 0x80
-    0xCD, 0x80,
-
-    // mov edi, eax
-    // 1回目の戻り値を第1引数にする
-    0x89, 0xC7,
-
-    // mov eax, 2
-    0xB8, 0x02, 0x00, 0x00, 0x00,
-
-    // int 0x80
-    0xCD, 0x80,
-
-    // jmp $
-    0xEB, 0xFE,
-];
 
 pub fn run_test() -> ! {
     let base = match crate::paging::user_base() {

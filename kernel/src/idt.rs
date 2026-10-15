@@ -381,41 +381,51 @@ fn fill_screen(colortype: u8) {
         return;
     }
 
-    // 32-bit GOPピクセル形式
-    let pixel: u32 = match (fb.pixel_format, colortype) {
+    let (red, green, blue): (u8, u8, u8) = match colortype {
+        0 => (0, 0, 255),       // Blue
+        1 => (0, 0, 128),       // Dark blue
+        2 => (0, 128, 0),       // Dark green
+        3 => (255, 0, 0),       // Red
+        4 => (0, 255, 0),       // Green
+        5 => (255, 255, 0),     // Yellow
+        6 => (255, 0, 255),     // Purple
+        7 => (255, 255, 255),   // White
+        8 => (0, 0, 0),         // Black
+        _ => return,
+    };
+
+    fn scale_channel(value: u8, mask: u32) -> u32 {
+        if mask == 0 {
+            return 0;
+        }
+
+        let shift = mask.trailing_zeros();
+        let max_value = mask >> shift;
+        let scaled = (value as u64 * max_value as u64 / 255) as u32;
+
+        (scaled << shift) & mask
+    }
+
+    let pixel: u32 = match fb.pixel_format {
         // PixelRedGreenBlueReserved8BitPerColor
-        (0, 0) => 0x00FF_0000, // Blue
-        (0, 1) => 0x0080_0000, // Dark blue
+        0 => {
+            ((blue as u32) << 16)
+                | ((green as u32) << 8)
+                | red as u32
+        }
 
         // PixelBlueGreenRedReserved8BitPerColor
-        (1, 0) => 0x0000_00FF, // Blue
-        (1, 1) => 0x0000_0080, // Dark blue
-
-        (0, 2) | (1, 2) => 0x0000_8000, // Dark green
+        1 => {
+            ((red as u32) << 16)
+                | ((green as u32) << 8)
+                | blue as u32
+        }
 
         // PixelBitMask
-        (2, 0) => fb.pixel_information[2],
-        (2, 1) => {
-            let mask = fb.pixel_information[2];
-
-            if mask == 0 {
-                return;
-            }
-
-            let shift = mask.trailing_zeros();
-            let max_value = mask >> shift;
-            (max_value / 2 + 1) << shift
-        }
-        (2, 2) => {
-            let mask = fb.pixel_information[1];
-
-            if mask == 0 {
-                return;
-            }
-
-            let shift = mask.trailing_zeros();
-            let max_value = mask >> shift;
-            (max_value / 2) << shift
+        2 => {
+            scale_channel(red, fb.pixel_information[0])
+                | scale_channel(green, fb.pixel_information[1])
+                | scale_channel(blue, fb.pixel_information[2])
         }
 
         _ => return,
@@ -501,5 +511,25 @@ extern "win64" fn ring3_test_int80_handler(
 
         // 未対応のシステムコール
         _ => u64::MAX,
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "win64" fn syscall_dispatch(
+    number: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+) -> u64 {
+    match number {
+        3 => {
+            if arg1 > 8 {
+                return u64::MAX;
+            }
+
+            fill_screen(arg1 as u8);
+            0
+        }
+        _ => ring3_test_int80_handler(number, arg1, arg2, arg3),
     }
 }
