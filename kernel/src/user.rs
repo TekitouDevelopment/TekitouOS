@@ -6,10 +6,82 @@ const PAGE_SIZE: u64 = 4096;
 const USER_DATA_SELECTOR: u64 = 0x2B;
 const USER_CODE_SELECTOR: u64 = 0x33;
 
-const USER_TEST_CODE: &[u8] = include_bytes!("../testapp1.bin");
+#[unsafe(no_mangle)]
+static mut USER_EXIT_KERNEL_RSP: u64 = 0;
 
+#[unsafe(no_mangle)]
+static mut USER_EXIT_RETURN_RIP: u64 = 0;
 
-pub fn run_test() -> ! {
+#[unsafe(no_mangle)]
+static mut USER_EXIT_STATUS: u64 = 0;
+
+unsafe extern "C" {
+    fn enter_user_mode(user_rip: u64, user_rsp: u64) -> u64;
+}
+
+core::arch::global_asm!(
+    r#"
+    .section .text,"ax",@progbits
+    .balign 16
+
+    .global enter_user_mode
+enter_user_mode:
+    cli
+    cld
+
+    // Rustの呼び出し規約で保存が必要なレジスタを退避
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+
+    // 引数を保持
+    mov r12, rdi
+    mov r13, rsi
+
+    // 終了時に復元するカーネルスタック
+    mov qword ptr [rip + USER_EXIT_KERNEL_RSP], rsp
+
+    // 終了時の復帰先
+    lea rax, [rip + .Luser_exit_return]
+    mov qword ptr [rip + USER_EXIT_RETURN_RIP], rax
+
+    // Ring3へのiretqフレーム
+    push 0x2B
+    push r13
+    pushfq
+    and qword ptr [rsp], -513
+    push 0x33
+    push r12
+
+    mov ax, 0x2B
+    mov ds, ax
+    mov es, ax
+
+    iretq
+
+.Luser_exit_return:
+    // SYS_EXITでここへ戻ってきたら、保存したレジスタを復元
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+
+    // SYS_EXITに指定された終了コードを返す
+    mov rax, qword ptr [rip + USER_EXIT_STATUS]
+    ret
+"#
+);
+
+pub fn run_app(code: &[u8]) -> u64 {
+    if code.is_empty() || code.len() > PAGE_SIZE as usize {
+        halt();
+    }
+
     let base = match crate::paging::user_base() {
         Some(address) => address,
         None => halt(),
@@ -36,13 +108,24 @@ pub fn run_test() -> ! {
         Some(address) => address,
         None => halt(),
     };
-
-    // 物理ページへユーザーコードを書き込む。
+    // 物理ページをゼロ初期化してからユーザーコードを書き込む。
     unsafe {
-        ptr::copy_nonoverlapping(
-            USER_TEST_CODE.as_ptr(),
+        ptr::write_bytes(
             code_physical as usize as *mut u8,
-            USER_TEST_CODE.len(),
+            0,
+            PAGE_SIZE as usize,
+        );
+
+        ptr::write_bytes(
+            stack_physical as usize as *mut u8,
+            0,
+            PAGE_SIZE as usize,
+        );
+
+        ptr::copy_nonoverlapping(
+            code.as_ptr(),
+            code_physical as usize as *mut u8,
+            code.len(),
         );
     }
 
@@ -66,44 +149,36 @@ pub fn run_test() -> ! {
         halt();
     }
 
-    unsafe {
-        enter_user_mode(code_virtual, stack_top);
+
+    // SYS_EXITからカーネルへ復帰する。
+    let exit_status = unsafe {
+        enter_user_mode(code_virtual, stack_top)
+    };
+
+    // スタックを先にアンマップする。
+    let stack_frame =
+        match crate::paging::unmap_user_page(stack_virtual) {
+            Some(address) => address,
+            None => halt(),
+        };
+
+    if !crate::memory::free_page(stack_frame) {
+        halt();
     }
-}
 
-unsafe fn enter_user_mode(
-    user_rip: u64,
-    user_rsp: u64,
-) -> ! {
-    unsafe {
-        asm!(
-        "cli",
+    // 次にコードをアンマップする。
+    // 最後のマッピングなら、空になったページテーブルも回収される。
+    let code_frame =
+        match crate::paging::unmap_user_page(code_virtual) {
+            Some(address) => address,
+            None => halt(),
+        };
 
-        // iretq用のスタックフレームを作る。
-        "push {user_ss}",
-        "push {user_rsp}",
-        "pushfq",
-
-        // Ring3では割り込みを有効化せず、IF=0を維持する。
-        "and qword ptr [rsp], -513",
-
-        "push {user_cs}",
-        "push {user_rip}",
-
-        // データセグメントをユーザー用に切り替える。
-        "mov ax, {user_ss}",
-        "mov ds, ax",
-        "mov es, ax",
-
-        "iretq",
-
-        user_ss = const USER_DATA_SELECTOR,
-        user_rsp = in(reg) user_rsp,
-        user_cs = const USER_CODE_SELECTOR,
-        user_rip = in(reg) user_rip,
-        options(noreturn),
-        );
+    if !crate::memory::free_page(code_frame) {
+        halt();
     }
+
+    exit_status
 }
 
 fn halt() -> ! {

@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "bootloader",
-    "kernel", "testapp1",
+    "kernel", "testapp1","testapp2"
 ]
 default-members = ["bootloader"]
 resolver = "3"

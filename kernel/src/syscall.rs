@@ -188,5 +188,25 @@ syscall_entry:
     // ユーザースタックへ戻る。
     mov rsp, qword ptr [rip + SYSCALL_USER_RSP]
     sysretq
+
+        .balign 16
+    .global syscall_exit
+syscall_exit:
+    cli
+    cld
+
+    // カーネルのデータセグメントへ戻す
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+
+    // Win64 ABIの第1引数RCXが終了コード
+    mov qword ptr [rip + USER_EXIT_STATUS], rcx
+
+    // Ring3へ入る直前のカーネルスタックを復元
+    mov rsp, qword ptr [rip + USER_EXIT_KERNEL_RSP]
+
+    // syscall_entryやsysretqを通らず、カーネルの続きへ戻る
+    jmp qword ptr [rip + USER_EXIT_RETURN_RIP]
 "#
 );

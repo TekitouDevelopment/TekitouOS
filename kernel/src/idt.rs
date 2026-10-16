@@ -81,6 +81,10 @@ unsafe extern "C" {
     static ring3_test_int80_stub: u8;
 }
 
+unsafe extern "win64" {
+    fn syscall_exit(status: u64) -> !;
+}
+
 core::arch::global_asm!(
     r#"
     .section .text,"ax",@progbits
@@ -489,6 +493,32 @@ extern "win64" fn exception_handler(
 const SYSCALL_RETURN_TEST: u64 = 0x5445_4B49;
 
 #[unsafe(no_mangle)]
+extern "win64" fn syscall_dispatch(
+    number: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+) -> u64 {
+    match number {
+        // #3：画面色の変更
+        3 => {
+            if arg1 > 8 {
+                return u64::MAX;
+            }
+
+            fill_screen(arg1 as u8);
+            0
+        }
+
+        // #4：アプリ終了
+        4 => unsafe { syscall_exit(arg1) },
+
+        // #1・#2：既存の処理を維持
+        _ => ring3_test_int80_handler(number, arg1, arg2, arg3),
+    }
+}
+
+#[unsafe(no_mangle)]
 extern "win64" fn ring3_test_int80_handler(
     number: u64,
     arg1: u64,
@@ -496,10 +526,10 @@ extern "win64" fn ring3_test_int80_handler(
     _arg3: u64,
 ) -> u64 {
     match number {
-        // syscall 1: テスト用の値を返す
+        // syscall #1：テスト用の値を返す
         1 => SYSCALL_RETURN_TEST,
 
-        // syscall 2: 渡された引数が正しければ成功
+        // syscall #2：値を検証する
         2 => {
             if arg1 == SYSCALL_RETURN_TEST {
                 fill_screen(2);
@@ -509,27 +539,6 @@ extern "win64" fn ring3_test_int80_handler(
             }
         }
 
-        // 未対応のシステムコール
         _ => u64::MAX,
-    }
-}
-
-#[unsafe(no_mangle)]
-extern "win64" fn syscall_dispatch(
-    number: u64,
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-) -> u64 {
-    match number {
-        3 => {
-            if arg1 > 8 {
-                return u64::MAX;
-            }
-
-            fill_screen(arg1 as u8);
-            0
-        }
-        _ => ring3_test_int80_handler(number, arg1, arg2, arg3),
     }
 }

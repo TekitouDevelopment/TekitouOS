@@ -119,7 +119,31 @@ pub extern "win64" fn _start(
         halt();
     }
 
-    crate::user::run_test();
+    // testapp1：終了コード 0
+    let status1 = crate::user::run_app(
+        include_bytes!("../testapp1.bin"),
+    );
+
+    // testapp2：終了コード 2
+    let status2 = crate::user::run_app(
+        include_bytes!("../testapp2.bin"),
+    );
+
+    // testapp1をもう一度：終了コード 0
+    let status3 = crate::user::run_app(
+        include_bytes!("../testapp1.bin"),
+    );
+
+    // 0 → 2 → 0 の順に戻ってきたら成功
+    if status1 == 0 && status2 == 2 && status3 == 0 {
+        if !fill_screen_green(info) {
+            halt();
+        }
+    } else {
+        // 失敗時は白色にする
+        let _ = fill_screen_white(info);
+    }
+
 
     loop {
         core::hint::spin_loop();

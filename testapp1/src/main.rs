@@ -27,15 +27,21 @@ core::arch::global_asm!(
 _start:
     and rsp, -16
     call rust_main
-1:
-    pause
-    jmp 1b
+
+    // rust_mainが戻ったらsyscall #4で終了
+    mov eax, 4
+    xor edi, edi
+    syscall
+
+    // 終了syscallが戻ってきた場合は異常
+    ud2
 "#
 );
 
 #[unsafe(no_mangle)]
 extern "C" fn rust_main(){
-    syscall1(SYS_SET_SCREEN_COLOR,COLOR_YELLOW);
+    
+    syscall1(SYS_SET_SCREEN_COLOR,COLOR_PURPLE);
 }
 
 #[inline(always)]

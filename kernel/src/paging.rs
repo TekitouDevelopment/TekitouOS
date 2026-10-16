@@ -346,3 +346,135 @@ fn enable_nxe() -> bool {
 
     true
 }
+
+/// ユーザーページのマッピングを解除する。
+/// 成功時は解除した物理ページのアドレスを返す。
+/// 物理ページ自体の解放は呼び出し側が行う。
+pub fn unmap_user_page(virtual_address: u64) -> Option<u64> {
+    if !unsafe { read_volatile(addr_of!(INITIALIZED)) }
+        || virtual_address == 0
+        || virtual_address % PAGE_SIZE != 0
+    {
+        return None;
+    }
+
+    let base = unsafe { read_volatile(addr_of!(USER_BASE)) };
+    let end = base.checked_add(PML4_SPAN)?;
+
+    if virtual_address < base || virtual_address >= end {
+        return None;
+    }
+
+    let root = unsafe { read_volatile(addr_of!(PML4_PHYSICAL)) };
+    if root == 0 {
+        return None;
+    }
+
+    let indices = [
+        ((virtual_address >> 39) & 0x1FF) as usize,
+        ((virtual_address >> 30) & 0x1FF) as usize,
+        ((virtual_address >> 21) & 0x1FF) as usize,
+        ((virtual_address >> 12) & 0x1FF) as usize,
+    ];
+
+    let pml4 = root as usize as *mut u64;
+    let pml4e_ptr = unsafe { pml4.add(indices[0]) };
+    let pml4e = unsafe { read_volatile(pml4e_ptr) };
+
+    if pml4e & PRESENT == 0 || pml4e & HUGE_PAGE != 0 {
+        return None;
+    }
+
+    let pdpt_physical = pml4e & ADDRESS_MASK;
+    if pdpt_physical == 0 {
+        return None;
+    }
+
+    let pdpt = pdpt_physical as usize as *mut u64;
+    let pdpte_ptr = unsafe { pdpt.add(indices[1]) };
+    let pdpte = unsafe { read_volatile(pdpte_ptr) };
+
+    if pdpte & PRESENT == 0 || pdpte & HUGE_PAGE != 0 {
+        return None;
+    }
+
+    let pd_physical = pdpte & ADDRESS_MASK;
+    if pd_physical == 0 {
+        return None;
+    }
+
+    let pd = pd_physical as usize as *mut u64;
+    let pde_ptr = unsafe { pd.add(indices[2]) };
+    let pde = unsafe { read_volatile(pde_ptr) };
+
+    if pde & PRESENT == 0 || pde & HUGE_PAGE != 0 {
+        return None;
+    }
+
+    let pt_physical = pde & ADDRESS_MASK;
+    if pt_physical == 0 {
+        return None;
+    }
+
+    let pt = pt_physical as usize as *mut u64;
+    let pte_ptr = unsafe { pt.add(indices[3]) };
+    let pte = unsafe { read_volatile(pte_ptr) };
+
+    if pte & PRESENT == 0 {
+        return None;
+    }
+
+    let physical_address = pte & ADDRESS_MASK;
+    if physical_address == 0 {
+        return None;
+    }
+
+    // まず対象のマッピングを解除する。
+    unsafe {
+        write_volatile(pte_ptr, 0);
+
+        // 古い仮想アドレスの変換をTLBから無効化する。
+        asm!(
+            "invlpg [{}]",
+            in(reg) virtual_address,
+            options(nostack, preserves_flags),
+        );
+    }
+
+    // ページテーブルが空なら、親から切り離して回収する。
+    if table_is_empty(pt) {
+        unsafe {
+            write_volatile(pde_ptr, 0);
+        }
+        let _ = crate::memory::free_page(pt_physical);
+
+        if table_is_empty(pd) {
+            unsafe {
+                write_volatile(pdpte_ptr, 0);
+            }
+            let _ = crate::memory::free_page(pd_physical);
+
+            if table_is_empty(pdpt) {
+                unsafe {
+                    write_volatile(pml4e_ptr, 0);
+                }
+                let _ = crate::memory::free_page(pdpt_physical);
+            }
+        }
+    }
+
+    Some(physical_address)
+}
+
+/// ページテーブルに有効なエントリーが残っていないか確認する。
+fn table_is_empty(table: *const u64) -> bool {
+    for index in 0..512 {
+        let entry = unsafe { read_volatile(table.add(index)) };
+
+        if entry & PRESENT != 0 {
+            return false;
+        }
+    }
+
+    true
+}
